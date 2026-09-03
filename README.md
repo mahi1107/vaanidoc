@@ -357,6 +357,6 @@ During development, an issue arose where a stale `MockASR` process intercepting 
 
 ## 17. Demo & Links
 
-- **GitHub Repository**: [https://github.com/mahi1107/vaanidoc](https://github.com/mahi1107/vaanidoc)
-- **Live Demo**: *(Deploying for Buildathon)*
-- **Demo Video**: *(Submission link)*
+- **Live Demo**: https://vaanidoc-app.vercel.app/
+- **GitHub Repository**: https://github.com/mahi1107/vaanidoc
+  
