@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: vaanidoc-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: vaanidoc_user
+      POSTGRES_PASSWORD: vaanidoc_password
+      POSTGRES_DB: vaanidoc_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vaanidoc_user -d vaanidoc_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: vaanidoc-backend
+    restart: unless-stopped
+    environment:
+      - APP_ENV=production
+      - DATABASE_URL=postgresql://vaanidoc_user:vaanidoc_password@postgres:5432/vaanidoc_db
+      - ASR_PROVIDER=indic
+      - NLP_PROVIDER=indic
+      - TTS_PROVIDER=indic
+      - IVR_PROVIDER=exotel
+      - SMS_PROVIDER=twilio
+      - TIMEZONE=Asia/Kolkata
+      - CORS_ORIGINS=*
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: vaanidoc-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
