@@ -69,7 +69,12 @@ class IndicASRService(BaseASRService):
 
         # 2. Transcribe Binary PCM/WAV Audio using SpeechRecognition
         try:
-            import speech_recognition as sr
+            try:
+                import speech_recognition as sr
+            except ImportError as imp_err:
+                logger.error(f"[IndicASR] SpeechRecognition package not installed: {imp_err}")
+                raise imp_err
+
             r = sr.Recognizer()
             r.energy_threshold = 300
             r.dynamic_energy_threshold = True
@@ -91,6 +96,7 @@ class IndicASRService(BaseASRService):
                         recognized_lang = "en" if "en" in l_code else "hi"
                         break
                 except sr.UnknownValueError:
+                    logger.debug(f"[IndicASR] Speech not recognized under language code: {l_code}")
                     continue
                 except sr.RequestError as req_err:
                     logger.warning(f"[IndicASR] Google Speech API request error for {l_code}: {req_err}")
@@ -107,7 +113,7 @@ class IndicASRService(BaseASRService):
                 )
 
         except Exception as e:
-            logger.warning(f"[IndicASR] SpeechRecognition audio processing notice: {e}")
+            logger.warning(f"[IndicASR] Speech audio processing note: {e}")
 
         # 3. Audio is inaudible, silent, or unparseable — fail safely without fake clinical symptoms
         logger.info("[IndicASR] Audio could not be transcribed — triggering low-confidence clarification.")

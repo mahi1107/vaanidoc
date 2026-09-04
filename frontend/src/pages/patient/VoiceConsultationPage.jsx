@@ -3,8 +3,36 @@ import { Mic, MicOff, Volume2, ArrowLeft, ShieldAlert, CheckCircle, Hospital, Ph
 import { processBrowserAudio, startVoiceConsultation, addPatientSessionCode, clearPatientSessionCodes } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 
+// Helper to downsample Float32 PCM audio from device/context sample rate to target sample rate (16000 Hz)
+function downsampleBuffer(buffer, srcRate, targetRate = 16000) {
+  if (srcRate === targetRate || !srcRate) {
+    return buffer;
+  }
+  if (srcRate < targetRate) {
+    return buffer;
+  }
+  const ratio = srcRate / targetRate;
+  const newLength = Math.round(buffer.length / ratio);
+  const result = new Float32Array(newLength);
+  let offsetResult = 0;
+  let offsetBuffer = 0;
+  while (offsetResult < result.length) {
+    const nextOffsetBuffer = Math.round((offsetResult + 1) * ratio);
+    let accum = 0;
+    let count = 0;
+    for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+      accum += buffer[i];
+      count++;
+    }
+    result[offsetResult] = count > 0 ? accum / count : 0;
+    offsetResult++;
+    offsetBuffer = nextOffsetBuffer;
+  }
+  return result;
+}
+
 // Helper to encode Float32Array PCM samples into standard 16-bit 16kHz RIFF/WAVE Blob
-function encodeWAV(samples, sampleRate = 16000) {
+function encodeWAV(samples, srcSampleRate = 16000, targetSampleRate = 16000) {
   let totalLength = samples.reduce((acc, b) => acc + b.length, 0);
   let merged = new Float32Array(totalLength);
   let offset = 0;
@@ -13,7 +41,12 @@ function encodeWAV(samples, sampleRate = 16000) {
     offset += b.length;
   }
 
-  const buffer = new ArrayBuffer(44 + merged.length * 2);
+  // Downsample to exactly 16000 Hz if recorded at hardware sample rate (e.g. 48kHz or 44.1kHz)
+  const resampled = (srcSampleRate && srcSampleRate !== targetSampleRate)
+    ? downsampleBuffer(merged, srcSampleRate, targetSampleRate)
+    : merged;
+
+  const buffer = new ArrayBuffer(44 + resampled.length * 2);
   const view = new DataView(buffer);
 
   // Helper to write ASCII
@@ -25,27 +58,27 @@ function encodeWAV(samples, sampleRate = 16000) {
 
   // RIFF identifier
   writeString(view, 0, 'RIFF');
-  view.setUint32(4, 36 + merged.length * 2, true);
+  view.setUint32(4, 36 + resampled.length * 2, true);
   writeString(view, 8, 'WAVE');
 
   // fmt sub-chunk
   writeString(view, 12, 'fmt ');
-  view.setUint32(16, 16, true); // Subchunk1Size
+  view.setUint32(16, 16, true); // Subchunk1Size (16 for PCM)
   view.setUint16(20, 1, true); // PCM format (1)
   view.setUint16(22, 1, true); // Mono channel (1)
-  view.setUint32(24, sampleRate, true); // Sample rate (16000)
-  view.setUint32(28, sampleRate * 2, true); // Byte rate (SampleRate * NumChannels * BitsPerSample/8)
+  view.setUint32(24, targetSampleRate, true); // Sample rate (16000)
+  view.setUint32(28, targetSampleRate * 2, true); // Byte rate (SampleRate * NumChannels * BitsPerSample/8)
   view.setUint16(32, 2, true); // Block align (NumChannels * BitsPerSample/8)
   view.setUint16(34, 16, true); // Bits per sample (16)
 
   // data sub-chunk
   writeString(view, 36, 'data');
-  view.setUint32(40, merged.length * 2, true);
+  view.setUint32(40, resampled.length * 2, true);
 
   // Write 16-bit signed PCM samples
   let index = 44;
-  for (let i = 0; i < merged.length; i++) {
-    let s = Math.max(-1, Math.min(1, merged[i]));
+  for (let i = 0; i < resampled.length; i++) {
+    let s = Math.max(-1, Math.min(1, resampled[i]));
     view.setInt16(index, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
     index += 2;
   }
@@ -73,6 +106,7 @@ export default function VoiceConsultationPage({
   const audioChunksRef = useRef([]);
   const pcmSamplesRef = useRef([]);
   const audioContextRef = useRef(null);
+  const capturedSampleRateRef = useRef(16000);
   const processorNodeRef = useRef(null);
   const analyserRef = useRef(null);
   const animFrameRef = useRef(null);
@@ -106,7 +140,6 @@ export default function VoiceConsultationPage({
       const stream = await navigator.mediaDevices.getUserMedia({ 
         audio: {
           channelCount: 1,
-          sampleRate: 16000,
           echoCancellation: true,
           noiseSuppression: true
         } 
@@ -115,8 +148,9 @@ export default function VoiceConsultationPage({
       // 2. Setup Web Audio API with PCM sample recorder & real-time volume visualizer
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
       if (AudioCtx) {
-        const audioCtx = new AudioCtx({ sampleRate: 16000 });
+        const audioCtx = new AudioCtx();
         audioContextRef.current = audioCtx;
+        capturedSampleRateRef.current = audioCtx.sampleRate || 16000;
         const source = audioCtx.createMediaStreamSource(stream);
 
         // Visualizer Analyser
@@ -150,7 +184,7 @@ export default function VoiceConsultationPage({
         updateVolume();
       }
 
-      // 3. Setup Web Speech API for real-time multilingual ASR
+      // 3. Setup Web Speech API for optional real-time transcript
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       if (SpeechRecognition) {
         try {
@@ -172,7 +206,7 @@ export default function VoiceConsultationPage({
           };
 
           recognition.onerror = (e) => {
-            console.log('SpeechRecognition info:', e.error);
+            console.log('SpeechRecognition notice:', e.error);
           };
 
           recognition.start();
@@ -194,11 +228,12 @@ export default function VoiceConsultationPage({
         };
 
         recorder.onstop = async () => {
+          const nativeSampleRate = capturedSampleRateRef.current || 16000;
           stopMicrophoneStream();
-          // Prefer pure PCM 16kHz WAV if captured, otherwise fallback to MediaRecorder blob
+          // Downsample and encode pure 16kHz 16-bit PCM WAV
           let audioBlob;
           if (pcmSamplesRef.current.length > 0) {
-            audioBlob = encodeWAV(pcmSamplesRef.current, 16000);
+            audioBlob = encodeWAV(pcmSamplesRef.current, nativeSampleRate, 16000);
           } else {
             audioBlob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
           }
@@ -234,10 +269,11 @@ export default function VoiceConsultationPage({
       mediaRecorderRef.current.stop();
     } else {
       setStage('processing');
+      const nativeSampleRate = capturedSampleRateRef.current || 16000;
       stopMicrophoneStream();
       let audioBlob;
       if (pcmSamplesRef.current.length > 0) {
-        audioBlob = encodeWAV(pcmSamplesRef.current, 16000);
+        audioBlob = encodeWAV(pcmSamplesRef.current, nativeSampleRate, 16000);
       } else {
         audioBlob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
       }
